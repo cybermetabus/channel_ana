@@ -34,34 +34,41 @@ def handle_api_error(e):
 def get_channel_id(youtube, handle):
     handle = handle.strip()
     if not handle.startswith('@'): handle = '@' + handle
-    res = youtube.search().list(q=handle, type='channel', part='id', maxResults=1).execute()
-    return res['items'][0]['id']['channelId'] if res.get('items') else None
+    try:
+        res = youtube.search().list(q=handle, type='channel', part='id', maxResults=1).execute()
+        return res['items'][0]['id']['channelId'] if res.get('items') else None
+    except: return None
 
 # --- 3. 세션 관리 ---
 if 'user' not in st.session_state: st.session_state.user = None
 if 'user_api_keys' not in st.session_state: st.session_state.user_api_keys = []
 
-# --- 4. 로그인 화면 ---
+# --- 4. 로그인 화면 (💡 중복 ID 에러 해결 - key 추가) ---
 def login_page():
     st.title("🔐 YouTube Analyzer")
     t1, t2 = st.tabs(["로그인", "회원가입"])
     with t1:
-        e = st.text_input("이메일")
-        p = st.text_input("비밀번호", type="password")
-        if st.button("로그인"):
+        st.subheader("로그인")
+        e = st.text_input("이메일", key="login_email_input")
+        p = st.text_input("비밀번호", type="password", key="login_pw_input")
+        if st.button("로그인 실행", key="login_btn"):
             try:
                 res = supabase.auth.sign_in_with_password({"email": e, "password": p})
                 st.session_state.user = res.user
                 st.rerun()
-            except: st.error("로그인 실패")
+            except: st.error("로그인 실패: 정보를 확인해주세요.")
     with t2:
-        ne = st.text_input("가입 이메일")
-        np = st.text_input("비밀번호", type="password")
-        if st.button("회원가입"):
-            try:
-                supabase.auth.sign_up({"email": ne, "password": np})
-                st.success("인증 메일을 확인하거나 바로 로그인해보세요.")
-            except Exception as ex: st.error(f"실패: {ex}")
+        st.subheader("새 계정 만들기")
+        ne = st.text_input("가입 이메일", key="signup_email_input")
+        np = st.text_input("비밀번호", type="password", key="signup_pw_input")
+        npc = st.text_input("비밀번호 확인", type="password", key="signup_pw_confirm")
+        if st.button("회원가입 실행", key="signup_btn"):
+            if np == npc: 
+                try:
+                    supabase.auth.sign_up({"email": ne, "password": np})
+                    st.success("회원가입 성공! 이제 로그인 탭에서 로그인해주세요.")
+                except Exception as ex: st.error(f"실패: {ex}")
+            else: st.error("비밀번호가 서로 일치하지 않습니다.")
 
 # --- 5. 메인 앱 ---
 def main_app():
@@ -74,8 +81,8 @@ def main_app():
         # API 키 관리
         raw_keys = st.text_area("🔑 API Keys (한 줄에 하나씩)", 
                                value="\n".join(st.session_state.user_api_keys),
-                               height=100).split('\n')
-        if st.button("키 리스트 적용"):
+                               height=100, key="api_keys_area").split('\n')
+        if st.button("키 리스트 적용", key="apply_keys_btn"):
             st.session_state.user_api_keys = [k.strip() for k in raw_keys if k.strip()]
             st.success("적용됨")
         
@@ -83,39 +90,41 @@ def main_app():
         
         # 구독 채널 임포터 (사이드바 하단 이동)
         st.subheader("📥 채널 수집 도구")
-        import_handle = st.text_input("기준 채널 핸들 (예: @shukaworld)", key="importer")
-        default_cat = st.selectbox("기본 카테고리 지정", ["경제", "예능", "테크", "정보", "기타"], index=3)
+        import_handle = st.text_input("기준 채널 핸들 (예: @shukaworld)", key="importer_handle")
+        default_cat = st.selectbox("기본 카테고리 지정", ["경제", "예능", "테크", "정보", "기타"], index=3, key="default_cat_select")
         
-        if st.button("구독 목록 불러와서 DB 저장"):
+        if st.button("구독 목록 불러와서 DB 저장", key="import_subs_btn"):
             youtube = get_youtube_client()
             if not youtube: st.warning("API 키를 먼저 입력하세요.")
             else:
                 with st.spinner("목록 수집 중..."):
                     ch_id = get_channel_id(youtube, import_handle)
                     if ch_id:
-                        res = youtube.subscriptions().list(channelId=ch_id, part='snippet', maxResults=50).execute()
-                        count = 0
-                        for item in res.get('items', []):
-                            sub_id = item['snippet']['resourceId']['channelId']
-                            supabase.table('channels').upsert({
-                                "user_id": st.session_state.user.id,
-                                "channel_id": sub_id,
-                                "channel_name": item['snippet']['title'],
-                                "channel_url": f"https://youtube.com/channel/{sub_id}",
-                                "category": default_cat
-                            }, on_conflict="channel_id").execute()
-                            count += 1
-                        st.success(f"{count}개 채널 저장 완료!")
-                    else: st.error("채널을 찾을 수 없습니다.")
+                        try:
+                            res = youtube.subscriptions().list(channelId=ch_id, part='snippet', maxResults=50).execute()
+                            count = 0
+                            for item in res.get('items', []):
+                                sub_id = item['snippet']['resourceId']['channelId']
+                                supabase.table('channels').upsert({
+                                    "user_id": st.session_state.user.id,
+                                    "channel_id": sub_id,
+                                    "channel_name": item['snippet']['title'],
+                                    "channel_url": f"https://youtube.com/channel/{sub_id}",
+                                    "category": default_cat
+                                }, on_conflict="channel_id").execute()
+                                count += 1
+                            st.success(f"{count}개 채널 저장 완료!")
+                        except Exception as e: st.error(f"구독 목록 수집 실패 (비공개 채널 등): {e}")
+                    else: st.error("기준 채널을 찾을 수 없습니다.")
 
         st.divider()
-        if st.button("로그아웃"):
+        if st.button("로그아웃", key="logout_btn"):
             supabase.auth.sign_out()
             st.session_state.user = None
             st.rerun()
 
     # ---------------------------------------------------------
-    # 2단계: 메인 화면 (분석 탭 / DB 관리 탭)
+    # 2단계: 메인 화면 (분석 검색 / DB 관리)
     # ---------------------------------------------------------
     st.title("🎯 유튜브 알고리즘 벤치마킹 시스템")
     
@@ -127,24 +136,22 @@ def main_app():
         res = supabase.table('channels').select("*").execute()
         if res.data:
             df_db = pd.DataFrame(res.data)
-            st.info("표 안에서 카테고리를 직접 수정하거나 행을 선택해 삭제할 수 있습니다.")
+            st.info("카테고리를 수정한 뒤 하단 저장 버튼을 눌러주세요. 행을 선택해 Del키로 삭제도 가능합니다.")
             
-            # 카테고리 등 수정 가능한 데이터 에디터
             edited_df = st.data_editor(
                 df_db[['id', 'channel_name', 'category', 'channel_url']],
                 use_container_width=True,
-                num_rows="dynamic", # 행 삭제 가능
+                num_rows="dynamic",
                 column_config={
                     "category": st.column_config.SelectboxColumn(
                         "카테고리", options=["경제", "예능", "테크", "정보", "기타", "제외"], required=True
                     )
                 },
-                key="db_editor"
+                key="db_editor_widget"
             )
             
-            if st.button("💾 변경사항을 데이터베이스에 일괄 저장"):
+            if st.button("💾 변경사항을 데이터베이스에 일괄 저장", key="save_db_btn"):
                 with st.spinner("저장 중..."):
-                    # 실제 수정/삭제 로직 (여기서는 단순 업데이트 예시)
                     for _, row in edited_df.iterrows():
                         supabase.table('channels').update({"category": row['category']}).eq("id", row['id']).execute()
                     st.success("DB가 업데이트되었습니다!")
@@ -156,36 +163,31 @@ def main_app():
     with tab_search:
         res = supabase.table('channels').select("*").execute()
         if not res.data:
-            st.warning("먼저 채널 DB 관리 탭에서 채널을 등록해주세요.")
+            st.warning("먼저 사이드바에서 구독 채널들을 수집해주세요.")
         else:
             df_all = pd.DataFrame(res.data)
             all_categories = sorted(df_all['category'].unique())
 
-            with st.form("search_filter"):
+            with st.form("search_filter_form"):
                 st.subheader("⚙️ 검색 조건 설정")
                 c1, c2, c3 = st.columns([2, 1, 1])
-                
-                # 카테고리 다중 선택 (하나만, 여러개, 혹은 전체 선택 가능)
                 selected_cats = c1.multiselect("분석할 카테고리 선택", options=all_categories, default=all_categories)
-                
                 time_map = {"12시간": 12, "24시간": 24, "48시간": 48, "3일": 72, "1주일": 168, "한달": 720}
                 limit_label = c2.selectbox("업로드 시간 범위", list(time_map.keys()), index=4)
-                
                 min_view = c3.number_input("최소 조회수", value=10000, step=5000)
                 
                 c4, c5 = st.columns(2)
                 min_sub = c4.number_input("최소 구독자수", value=0)
                 max_sub = c5.number_input("최대 구독자수 (0은 무제한)", value=0)
                 
-                search_clicked = st.form_submit_button("🚀 설정된 리스트 분석 시작", type="primary")
+                search_clicked = st.form_submit_button("🚀 설정된 카테고리 분석 시작", type="primary")
 
             if search_clicked:
                 youtube = get_youtube_client()
                 if not youtube: st.warning("API 키를 입력하세요.")
                 else:
-                    # 선택된 카테고리에 해당하는 채널만 필터링
                     filtered_channels = df_all[df_all['category'].isin(selected_cats)]
-                    st.info(f"[{', '.join(selected_cats)}] 카테고리의 {len(filtered_channels)}개 채널을 스캔합니다.")
+                    st.info(f"{len(filtered_channels)}개 채널 스캔 중...")
                     
                     final_results = []
                     progress = st.progress(0)
@@ -193,16 +195,12 @@ def main_app():
 
                     for i, ch in enumerate(filtered_channels.to_dict('records')):
                         try:
-                            # 1. 채널 스탯 확인 (구독자수 필터)
                             ch_res = youtube.channels().list(id=ch['channel_id'], part='statistics').execute()
                             sub_count = int(ch_res['items'][0]['statistics'].get('subscriberCount', 0))
-                            
-                            if min_sub > 0 and sub_count < min_sub: continue
-                            if max_sub > 0 and sub_count > max_sub: continue
+                            if (min_sub > 0 and sub_count < min_sub) or (max_sub > 0 and sub_count > max_sub): continue
 
-                            # 2. 최신 영상 50개 스캔
                             v_res = youtube.search().list(channelId=ch['channel_id'], part='snippet', maxResults=50, order='date', type='video').execute()
-                            v_ids = [item['id']['videoId'] for item in v_res.get('items', [])]
+                            v_ids = [v['id']['videoId'] for v in v_res.get('items', []) if 'videoId' in v['id']]
                             
                             if v_ids:
                                 d_res = youtube.videos().list(id=','.join(v_ids), part='statistics,snippet').execute()
@@ -225,19 +223,18 @@ def main_app():
                                         "링크": f"https://youtu.be/{item['id']}"
                                     })
                         except Exception as e:
-                            if not handle_api_error(e): st.write(f"오류: {ch['channel_name']} - {e}")
-                        
+                            if not handle_api_error(e): pass
                         progress.progress((i + 1) / len(filtered_channels))
 
                     if final_results:
-                        st.subheader("📊 분석 결과 (표 상단을 눌러 정렬)")
+                        st.subheader("📊 분석 결과")
                         st.data_editor(
                             pd.DataFrame(final_results).sort_values("VPH", ascending=False),
                             column_config={
                                 "썸네일": st.column_config.ImageColumn("썸네일"),
                                 "링크": st.column_config.LinkColumn("링크")
                             },
-                            use_container_width=True, hide_index=True
+                            use_container_width=True, hide_index=True, key="result_table"
                         )
                     else: st.warning("조건에 맞는 영상이 없습니다.")
 
