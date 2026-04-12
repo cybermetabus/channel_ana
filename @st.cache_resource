@@ -8,8 +8,8 @@ import isodate
 # --- 1. Supabase 초기화 ---
 @st.cache_resource
 def init_connection():
-    url = st.secrets["https://aumkkhwhfaosykhrzqym.supabase.co"]
-    key = st.secrets["sb_publishable_fAz9-OjTiTKg4gcK1vviaw_ZzjUCHbo"]
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
 
 supabase: Client = init_connection()
