@@ -32,17 +32,36 @@ def handle_api_error(e):
     return False
 
 def get_channel_id_robust(youtube, handle):
-    """핸들을 통해 정확한 채널 ID를 찾습니다."""
+    """핸들을 통해 정확한 채널 ID를 찾습니다 (Search API 차단 우회 버전)."""
     handle = handle.strip()
-    if not handle.startswith('@'): handle = '@' + handle
+    # 핸들이 @로 시작하지 않으면 붙여줍니다.
+    if not handle.startswith('@'):
+        clean_handle = '@' + handle
+    else:
+        clean_handle = handle
+        
     try:
-        # q=handle로 검색하되, 정확도를 위해 type=channel로 제한
-        res = youtube.search().list(q=handle, type='channel', part='snippet', maxResults=1).execute()
+        # search().list() 대신 channels().list()의 forHandle 매개변수를 사용합니다.
+        # 이 방법은 할당량이 1점밖에 안 들고(search는 100점), 차단될 확률이 거의 없습니다.
+        res = youtube.channels().list(
+            forHandle=clean_handle, 
+            part='id,snippet'
+        ).execute()
+        
         if res.get('items'):
-            return res['items'][0]['id']['channelId']
-        return None
+            return res['items'][0]['id']
+        else:
+            # 혹시 핸들로 못 찾을 경우를 대비한 일반 검색 (차단된 경우 에러 발생 가능)
+            st.warning(f"'{clean_handle}' 핸들로 직접 찾지 못했습니다. 일반 검색을 시도합니다.")
+            res_search = youtube.search().list(q=clean_handle, type='channel', part='id', maxResults=1).execute()
+            if res_search.get('items'):
+                return res_search['items'][0]['id']['channelId']
+            return None
     except Exception as e:
-        st.error(f"채널 검색 중 오류: {e}")
+        if "blocked" in str(e):
+            st.error("💡 Google에서 Search API 사용을 제한했습니다. 하지만 '채널 핸들' 기능으로 시도 중입니다.")
+        else:
+            st.error(f"채널 검색 중 오류 발생: {e}")
         return None
 
 # --- 3. 세션 관리 ---
