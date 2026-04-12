@@ -2,8 +2,9 @@ import streamlit as st
 from supabase import create_client, Client
 from googleapiclient.discovery import build
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import isodate
+import re
 
 # --- 1. Supabase 초기화 ---
 @st.cache_resource
@@ -14,171 +15,186 @@ def init_connection():
 
 supabase: Client = init_connection()
 
-# --- 2. 유튜브 API 클라이언트 (💡 유저 개별 API 키 사용으로 변경) ---
+# --- 2. 유튜브 API 엔진 (유저 개별 키 사용) ---
 def get_youtube_client():
-    # 이제 secrets.toml이 아니라 현재 유저가 입력한 session_state에서 키를 가져옵니다.
     api_key = st.session_state.get("user_api_key", "")
-    
     if not api_key:
-        st.error("⚠️ 왼쪽 사이드바에 본인의 유튜브 API 키를 먼저 입력해주세요!")
         return None
-        
     try:
         return build('youtube', 'v3', developerKey=api_key, cache_discovery=False)
-    except Exception as e:
-        st.error("🚨 API 키가 유효하지 않거나 연결에 실패했습니다.")
+    except:
         return None
 
-# --- 3. 세션 상태 관리 ---
+# --- 3. 유틸리티 함수 (핸들 인식 및 VPH 계산) ---
+def get_channel_id(youtube, url_or_handle):
+    """URL이나 @핸들에서 채널 ID를 추출합니다."""
+    if 'youtube.com/channel/' in url_or_handle:
+        return url_or_handle.split('/')[-1].split('?')[0]
+    
+    handle = url_or_handle.split('/')[-1].split('?')[0]
+    if not handle.startswith('@'):
+        handle = '@' + handle
+        
+    res = youtube.search().list(q=handle, type='channel', part='id', maxResults=1).execute()
+    if res.get('items'):
+        return res['items'][0]['id']['channelId']
+    return None
+
+def calculate_vph(views, published_at):
+    """현재 시간과 게시 시간을 비교하여 시간당 조회수(VPH)를 계산합니다."""
+    pub_date = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+    now = datetime.now(timezone.utc)
+    diff = now - pub_date
+    hours = max(diff.total_seconds() / 3600, 0.1) # 최소 0.1시간으로 계산
+    return round(views / hours, 1)
+
+# --- 4. 세션 상태 관리 ---
 if 'user' not in st.session_state:
     st.session_state.user = None
 if 'user_api_key' not in st.session_state:
     st.session_state.user_api_key = ""
 
-# --- 4. 로그인 / 회원가입 UI (💡 비밀번호 확인 기능 추가) ---
+# --- 5. 로그인 / 회원가입 UI ---
 def login_page():
     st.title("🔐 YouTube Analyzer 로그인")
-    
     tab1, tab2 = st.tabs(["로그인", "회원가입"])
-    
     with tab1:
-        st.subheader("로그인")
         email = st.text_input("이메일", key="login_email")
         password = st.text_input("비밀번호", type="password", key="login_password")
         if st.button("로그인 실행"):
             try:
-                response = supabase.auth.sign_in_with_password({"email": email, "password": password})
-                st.session_state.user = response.user
-                st.success("로그인 성공!")
-                st.rerun() 
-            except Exception as e:
-                st.error("로그인 실패: 이메일이나 비밀번호를 확인해주세요.")
-
+                res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                st.session_state.user = res.user
+                st.rerun()
+            except:
+                st.error("로그인 실패!")
     with tab2:
-        st.subheader("새 계정 만들기")
         new_email = st.text_input("이메일", key="signup_email")
-        new_password = st.text_input("비밀번호 (6자리 이상)", type="password", key="signup_password")
-        
-        # 💡 추가된 비밀번호 확인 로직
-        new_password_confirm = st.text_input("비밀번호 확인", type="password", key="signup_password_confirm")
-        
+        new_pw = st.text_input("비밀번호", type="password", key="signup_pw")
+        new_pw_c = st.text_input("비밀번호 확인", type="password", key="signup_pw_c")
         if st.button("회원가입 실행"):
-            if new_password != new_password_confirm:
-                st.error("⚠️ 비밀번호가 서로 일치하지 않습니다. 다시 확인해주세요.")
-            elif len(new_password) < 6:
-                st.error("⚠️ 비밀번호는 6자리 이상이어야 합니다.")
-            else:
+            if new_pw == new_pw_c:
                 try:
-                    response = supabase.auth.sign_up({"email": new_email, "password": new_password})
-                    st.success("🎉 회원가입 성공! 이제 로그인 탭에서 로그인해주세요.")
-                except Exception as e:
-                    st.error(f"회원가입 실패: {e}")
+                    supabase.auth.sign_up({"email": new_email, "password": new_pw})
+                    st.success("가입 성공! 로그인해주세요.")
+                except Exception as e: st.error(f"실패: {e}")
+            else: st.error("비밀번호 불일치")
 
-# --- 5. 메인 대시보드 ---
+# --- 6. 메인 앱 (모든 기능 복원) ---
 def main_app():
-    # --- 사이드바 영역 ---
+    # 사이드바 설정
     st.sidebar.title("👤 내 정보")
-    st.sidebar.write(f"접속 계정: {st.session_state.user.email}")
-    
+    st.sidebar.write(f"계정: {st.session_state.user.email}")
     st.sidebar.markdown("---")
-    
-    # 💡 유저별 개인 API 키 입력란 추가
-    st.sidebar.subheader("🔑 내 유튜브 API 키 설정")
-    input_api_key = st.sidebar.text_input("YouTube Data API v3 Key", type="password", value=st.session_state.user_api_key, placeholder="AIzaSy...")
-    
-    if st.sidebar.button("API 키 적용하기"):
-        st.session_state.user_api_key = input_api_key
-        st.sidebar.success("✅ API 키가 적용되었습니다!")
-        
-    st.sidebar.markdown("---")
-    
+    st.sidebar.subheader("🔑 유튜브 API 키")
+    api_input = st.sidebar.text_input("API Key 입력", type="password", value=st.session_state.user_api_key)
+    if st.sidebar.button("적용하기"):
+        st.session_state.user_api_key = api_input
+        st.sidebar.success("적용 완료!")
     if st.sidebar.button("로그아웃"):
         supabase.auth.sign_out()
         st.session_state.user = None
-        st.session_state.user_api_key = "" # 로그아웃 시 API 키도 초기화
         st.rerun()
 
-    # --- 메인 화면 영역 ---
-    st.title("🎯 내 알고리즘 분석기 (Cloud 버전)")
-    
-    # [데이터 추가 파트]
-    st.markdown("### ➕ 새 채널 추가하기")
-    with st.form("add_channel_form"):
-        col1, col2 = st.columns(2)
-        channel_name = col1.text_input("채널 이름 (예: 슈카월드)")
-        channel_url = col2.text_input("채널 URL 또는 핸들(@)")
-        category = st.selectbox("카테고리 지정", ["경제", "예능", "테크", "정보", "기타"])
-        
-        submitted = st.form_submit_button("DB에 저장")
-        if submitted and channel_name and channel_url:
-            try:
-                data, count = supabase.table('channels').insert({
-                    "user_id": st.session_state.user.id,
-                    "channel_name": channel_name,
-                    "channel_url": channel_url,
-                    "category": category
-                }).execute()
-                st.success(f"'{channel_name}' 채널이 안전하게 저장되었습니다!")
-            except Exception as e:
-                st.error(f"저장 실패: {e}")
+    st.title("🎯 YouTube 알고리즘 타겟 분석기")
 
-    st.divider()
+    tab1, tab2 = st.tabs(["📊 영상 분석", "⚙️ DB 관리"])
 
-    # [데이터 불러오기 파트]
-    st.markdown("### 📊 내가 수집한 채널 목록")
-    if st.button("새로고침 🔄"):
-        pass 
+    # [DB 관리 탭]
+    with tab2:
+        st.subheader("➕ 새 채널 추가")
+        with st.form("add_form"):
+            c1, c2, c3 = st.columns([2,3,2])
+            name = c1.text_input("채널명")
+            url = c2.text_input("URL 또는 @핸들")
+            cat = c3.selectbox("카테고리", ["경제", "예능", "테크", "정보", "기타"])
+            if st.form_submit_button("저장"):
+                supabase.table('channels').insert({"user_id": st.session_state.user.id, "channel_name": name, "channel_url": url, "category": cat}).execute()
+                st.success("저장 완료!")
         
-    try:
-        response = supabase.table('channels').select("*").execute()
-        channels_data = response.data
-        
-        if channels_data:
-            df_channels = pd.DataFrame(channels_data)
-            st.dataframe(df_channels[['channel_name', 'channel_url', 'category', 'created_at']], use_container_width=True)
+        st.divider()
+        res = supabase.table('channels').select("*").execute()
+        if res.data:
+            st.dataframe(pd.DataFrame(res.data)[['channel_name', 'channel_url', 'category']], use_container_width=True)
+
+    # [영상 분석 탭]
+    with tab1:
+        col1, col2, col3 = st.columns(3)
+        days = col1.number_input("분석 기간 (일)", value=7, min_value=1)
+        min_v = col2.number_input("최소 조회수", value=1000, step=1000)
+        v_type = col3.selectbox("포맷", ["전체", "롱폼만", "숏폼만"])
+
+        if st.button("🚀 전 채널 분석 시작", type="primary"):
+            if not st.session_state.user_api_key:
+                st.warning("왼쪽에서 API 키를 먼저 적용해주세요!")
+                return
             
-            st.divider()
-            st.markdown("### 🚀 VPH 알고리즘 분석기")
+            youtube = get_youtube_client()
+            res = supabase.table('channels').select("*").execute()
+            channels = res.data
             
-            col_a, col_b = st.columns(2)
-            max_days = col_a.number_input("최근 몇 일 이내의 영상을 분석할까요?", min_value=1, value=7)
-            min_views = col_b.number_input("최소 조회수 필터", min_value=0, value=10000, step=10000)
+            if not channels:
+                st.info("DB에 등록된 채널이 없습니다.")
+                return
+
+            results = []
+            progress = st.progress(0)
             
-            if st.button("내 채널 DB 전체 분석 시작!", type="primary"):
-                # 💡 API 키가 없으면 분석을 아예 시작하지 않음
-                if not st.session_state.user_api_key:
-                    st.warning("👈 왼쪽 사이드바에 YouTube API 키를 먼저 입력하고 적용 버튼을 눌러주세요!")
-                else:
-                    st.info(f"총 {len(channels_data)}개 채널의 최신 영상을 수집합니다. 잠시만 기다려주세요...")
-                    youtube = get_youtube_client()
+            for i, ch in enumerate(channels):
+                try:
+                    ch_id = get_channel_id(youtube, ch['channel_url'])
+                    if not ch_id: continue
                     
-                    if youtube:
-                        analyzed_videos = []
+                    # 최근 영상 가져오기
+                    v_res = youtube.search().list(channelId=ch_id, part='snippet', maxResults=10, order='date', type='video').execute()
+                    
+                    video_ids = [item['id']['videoId'] for item in v_res.get('items', [])]
+                    if not video_ids: continue
+                    
+                    # 영상 상세 정보 (조회수, 길이 등)
+                    d_res = youtube.videos().list(id=','.join(video_ids), part='statistics,contentDetails,snippet').execute()
+                    
+                    for item in d_res.get('items', []):
+                        # 게시일 필터링
+                        pub_at = item['snippet']['publishedAt']
+                        pub_date = datetime.fromisoformat(pub_at.replace('Z', '+00:00'))
+                        if datetime.now(timezone.utc) - pub_date > timedelta(days=days): continue
                         
-                        # (임시 더미 데이터 로직)
-                        for ch in channels_data:
-                            ch_name = ch['channel_name']
-                            analyzed_videos.append({
-                                "채널명": ch_name,
-                                "영상 제목": f"{ch_name}의 최신 영상 (API 작동 테스트)",
-                                "조회수": 50000,
-                                "게시일": "2일 전",
-                                "VPH (시간당조회수)": 1041,
-                                "분류": ch['category']
-                            })
+                        # 조회수 필터링
+                        views = int(item['statistics'].get('viewCount', 0))
+                        if views < min_v: continue
                         
-                        if analyzed_videos:
-                            df_result = pd.DataFrame(analyzed_videos)
-                            df_result = df_result.sort_values(by="VPH (시간당조회수)", ascending=False)
-                            st.success("✅ 분석 완료!")
-                            st.dataframe(df_result, use_container_width=True)
+                        # 길이 필터링 (ISO 8601 duration parsing)
+                        dur_str = item['contentDetails']['duration']
+                        duration = isodate.parse_duration(dur_str).total_seconds()
+                        
+                        is_short = duration <= 60
+                        if v_type == "롱폼만" and is_short: continue
+                        if v_type == "숏폼만" and not is_short: continue
+                        
+                        results.append({
+                            "채널": ch['channel_name'],
+                            "카테고리": ch['category'],
+                            "제목": item['snippet']['title'],
+                            "조회수": views,
+                            "VPH": calculate_vph(views, pub_at),
+                            "포맷": "숏폼" if is_short else "롱폼",
+                            "링크": f"https://youtu.be/{item['id']}"
+                        })
+                except Exception as e:
+                    st.error(f"{ch['channel_name']} 분석 중 오류: {e}")
+                
+                progress.progress((i + 1) / len(channels))
 
-        else:
-            st.info("아직 저장된 채널이 없습니다. 위에서 채널을 추가해보세요!")
-    except Exception as e:
-        st.error(f"데이터를 불러오는 중 오류 발생: {e}")
+            if results:
+                df = pd.DataFrame(results).sort_values("VPH", ascending=False)
+                st.success(f"총 {len(results)}개의 영상을 찾았습니다!")
+                # 클릭 가능한 링크로 만들기
+                st.data_editor(df, column_config={"링크": st.column_config.LinkColumn()}, use_container_width=True)
+            else:
+                st.warning("조건에 맞는 영상이 없습니다.")
 
-# --- 6. 프로그램 흐름 제어 ---
+# --- 7. 실행 제어 ---
 if st.session_state.user is None:
     login_page()
 else:
