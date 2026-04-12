@@ -78,25 +78,41 @@ def main_app():
         target_handle = st.text_input("기준 채널 핸들 (@비디오26 등)")
         custom_group = st.text_input("저장할 그룹명", value="미분류")
         
-        if st.button("구독 목록 DB에 저장"):
+        if st.button("구독 목록 '전체' DB에 저장"):
             youtube = get_youtube_client()
             if not youtube: st.warning("API 키를 입력하세요.")
             else:
-                with st.spinner("수집 중..."):
+                with st.spinner("모든 구독 리스트를 가져오는 중..."):
                     main_id = get_channel_id_by_handle(youtube, target_handle)
                     if main_id:
-                        res = youtube.subscriptions().list(channelId=main_id, part='snippet', maxResults=50).execute()
-                        subs = res.get('items', [])
-                        for s in subs:
-                            s_id = s['snippet']['resourceId']['channelId']
-                            supabase.table('channels').upsert({
-                                "user_id": st.session_state.user.id,
-                                "channel_id": s_id,
-                                "channel_name": s['snippet']['title'],
-                                "channel_url": f"https://youtube.com/channel/{s_id}",
-                                "category": custom_group
-                            }, on_conflict="channel_id").execute()
-                        st.success(f"{len(subs)}개 채널 저장 완료!")
+                        all_subs = []
+                        next_page_token = None
+                        
+                        # 💡 페이지 반복을 통해 전체 구독 목록 수집
+                        while True:
+                            res = youtube.subscriptions().list(
+                                channelId=main_id, 
+                                part='snippet', 
+                                maxResults=50,
+                                pageToken=next_page_token
+                            ).execute()
+                            
+                            for s in res.get('items', []):
+                                s_id = s['snippet']['resourceId']['channelId']
+                                supabase.table('channels').upsert({
+                                    "user_id": st.session_state.user.id,
+                                    "channel_id": s_id,
+                                    "channel_name": s['snippet']['title'],
+                                    "channel_url": f"https://youtube.com/channel/{s_id}",
+                                    "category": custom_group
+                                }, on_conflict="channel_id").execute()
+                                all_subs.append(s_id)
+                            
+                            next_page_token = res.get('nextPageToken')
+                            if not next_page_token:
+                                break
+                        
+                        st.success(f"총 {len(all_subs)}개 구독 채널 저장 완료!")
                     else: st.error("채널을 찾을 수 없습니다.")
         
         st.divider()
@@ -109,7 +125,7 @@ def main_app():
     st.title("🎯 알고리즘 타겟 전략 시스템")
     tab_scan, tab_manage = st.tabs(["🔍 콘텐츠 분석 검색", "⚙️ 채널 및 그룹 관리"])
 
-    # --- [탭 2] 채널 및 그룹 관리 (일괄 처리 기능 강화) ---
+    # --- [탭 2] 채널 및 그룹 관리 ---
     with tab_manage:
         st.subheader("🛠️ 그룹 일괄 관리 도구")
         res = supabase.table('channels').select("*").execute()
@@ -117,43 +133,35 @@ def main_app():
             df_db = pd.DataFrame(res.data)
             all_cats = sorted(df_db['category'].unique())
 
-            # 일괄 처리 섹션
-            with st.expander("🚀 카테고리별 일괄 수정/삭제 (전체 선택 가능)", expanded=True):
+            with st.expander("🚀 카테고리별 일괄 수정/삭제", expanded=True):
                 c1, c2 = st.columns(2)
                 mode = c1.radio("작업 범위", ["카테고리별 일괄 선택", "전체 채널 선택"])
                 
                 if mode == "카테고리별 일괄 선택":
-                    target_cats = c1.multiselect("대상 카테고리를 고르세요", options=all_cats)
-                    affected_count = len(df_all_target := df_db[df_db['category'].isin(target_cats)])
+                    target_cats = c1.multiselect("대상 카테고리", options=all_cats)
+                    affected_count = len(df_db[df_db['category'].isin(target_cats)])
                 else:
                     target_cats = all_cats
                     affected_count = len(df_db)
                 
-                st.info(f"선택된 작업 대상: **{affected_count}개 채널**")
-
+                st.info(f"대상: **{affected_count}개 채널**")
                 st.divider()
                 
-                new_name = c2.text_input("변경할 새 그룹명 입력", placeholder="예: IT전략팀")
-                if c2.button("🏷️ 선택 대상 그룹명 일괄 변경"):
-                    if mode == "카테고리별 일괄 선택" and not target_cats:
-                        st.warning("대상을 먼저 선택하세요.")
-                    else:
-                        with st.spinner("업데이트 중..."):
-                            for cat in target_cats:
-                                supabase.table('channels').update({"category": new_name}).eq("category", cat).eq("user_id", st.session_state.user.id).execute()
-                        st.success("일괄 변경 완료!"); st.rerun()
+                new_name = c2.text_input("새 그룹명", placeholder="예: IT전략팀")
+                if c2.button("🏷️ 그룹명 일괄 변경"):
+                    for cat in target_cats:
+                        supabase.table('channels').update({"category": new_name}).eq("category", cat).eq("user_id", st.session_state.user.id).execute()
+                    st.success("변경 완료!"); st.rerun()
 
-                if st.button("🗑️ 선택 대상 전체 삭제 (주의!)", type="secondary"):
-                    with st.spinner("삭제 중..."):
-                        if mode == "카테고리별 일괄 선택":
-                            for cat in target_cats:
-                                supabase.table('channels').delete().eq("category", cat).eq("user_id", st.session_state.user.id).execute()
-                        else:
-                            supabase.table('channels').delete().eq("user_id", st.session_state.user.id).execute()
-                    st.success("일괄 삭제되었습니다."); st.rerun()
+                if st.button("🗑️ 선택 대상 전체 삭제", type="secondary"):
+                    if mode == "카테고리별 일괄 선택":
+                        for cat in target_cats:
+                            supabase.table('channels').delete().eq("category", cat).eq("user_id", st.session_state.user.id).execute()
+                    else:
+                        supabase.table('channels').delete().eq("user_id", st.session_state.user.id).execute()
+                    st.success("삭제 완료!"); st.rerun()
 
             st.divider()
-            st.subheader("📝 개별 채널 수정")
             edited = st.data_editor(df_db[['id', 'channel_name', 'category', 'channel_url']], use_container_width=True, key="db_edit")
             if st.button("💾 개별 수정사항 저장"):
                 for _, row in edited.iterrows():
@@ -161,7 +169,7 @@ def main_app():
                 st.success("저장 완료!"); st.rerun()
         else: st.info("저장된 채널이 없습니다.")
 
-    # --- [탭 1] 콘텐츠 분석 검색 ---
+    # --- [탭 1] 콘텐츠 분석 검색 (정밀 스캔 강화) ---
     with tab_scan:
         if not res.data: st.warning("채널을 먼저 수집해주세요.")
         else:
@@ -197,7 +205,15 @@ def main_app():
                             subs = int(ch_res['items'][0]['statistics'].get('subscriberCount', 0))
                             if (min_s > 0 and subs < min_s) or (max_s > 0 and subs > max_s): continue
 
-                            v_res = youtube.search().list(channelId=ch['channel_id'], part='snippet', maxResults=50, order='date', type='video').execute()
+                            # 💡 각 채널별로 최신 영상을 최대 50개까지 수집하여 정밀 스캔
+                            v_res = youtube.search().list(
+                                channelId=ch['channel_id'], 
+                                part='snippet', 
+                                maxResults=50, 
+                                order='date', 
+                                type='video'
+                            ).execute()
+                            
                             v_ids = [v['id']['videoId'] for v in v_res.get('items', []) if 'videoId' in v['id']]
                             
                             if v_ids:
