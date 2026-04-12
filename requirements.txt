@@ -1,2 +1,5 @@
 streamlit
 supabase
+google-api-python-client
+isodate
+pandas
