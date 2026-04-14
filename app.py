@@ -65,7 +65,7 @@ def login_page():
     
     # 💡 주의: 아래 URL을 본인의 실제 Streamlit 배포 주소로 수정해야 합니다!
     # 예: https://your-app-name.streamlit.app
-    MY_APP_URL = "https://your-app-url.streamlit.app" 
+    MY_APP_URL = "https://channelana-zfxvkq4wl3yumajvnbdpdz.streamlit.app" 
 
     if st.button("🌐 Google 계정으로 로그인", type="primary", use_container_width=True):
         try:
