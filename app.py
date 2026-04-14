@@ -16,7 +16,7 @@ def init_connection():
 
 supabase: Client = init_connection()
 
-# --- 2. 세션 상태 관리 ---
+# --- 2. 세션 상태 관리 (진행도 보존) ---
 if 'api_key_index' not in st.session_state: st.session_state.api_key_index = 0
 if 'user' not in st.session_state: st.session_state.user = None
 if 'user_api_keys' not in st.session_state: st.session_state.user_api_keys = []
@@ -25,7 +25,7 @@ if 'current_batch_index' not in st.session_state: st.session_state.current_batch
 if 'stop_analysis' not in st.session_state: st.session_state.stop_analysis = False
 if 'selected_ids' not in st.session_state: st.session_state.selected_ids = set()
 
-# --- 3. API 엔진 및 유틸리티 ---
+# --- 3. API 엔진 로직 ---
 def get_youtube_client():
     keys = st.session_state.user_api_keys
     if not keys: return None
@@ -33,13 +33,12 @@ def get_youtube_client():
     return build('youtube', 'v3', developerKey=keys[idx], cache_discovery=False)
 
 def switch_api_key():
-    """할당량 초과 시 다음 키로 교체 및 알림"""
     st.session_state.api_key_index += 1
     if st.session_state.api_key_index >= len(st.session_state.user_api_keys):
-        st.error("🚨 [할당량 소진] 등록된 모든 API 키의 할당량이 끝났습니다! 내일 다시 시도하거나 새 키를 추가하세요.")
+        st.error("🚨 모든 API 키가 소진되었습니다! 내일 다시 시도하거나 새 키를 추가하세요.")
         st.session_state.stop_analysis = True
         return None
-    st.toast(f"🔄 키 교체 중... ({st.session_state.api_key_index + 1}번째 키)")
+    st.toast(f"🔄 다음 키로 전환 ({st.session_state.api_key_index + 1}번째)")
     return get_youtube_client()
 
 def get_channel_id_strong(youtube, input_text):
@@ -59,7 +58,7 @@ def get_channel_id_strong(youtube, input_text):
         if "quotaExceeded" in str(e): switch_api_key()
     return None
 
-# --- 4. 화면 구성용 함수 ---
+# --- 4. 화면 구성 함수 ---
 def login_page():
     st.title("🔐 YouTube Analyzer")
     t1, t2 = st.tabs(["로그인", "회원가입"])
@@ -80,14 +79,12 @@ def login_page():
             st.success("가입 완료!")
 
 def main_app():
-    # 사이드바
+    # [사이드바]
     with st.sidebar:
         st.subheader("👤 " + st.session_state.user.email)
-        # 할당량 상태 표시
         if st.session_state.user_api_keys:
             cur = (st.session_state.api_key_index % len(st.session_state.user_api_keys)) + 1
-            tot = len(st.session_state.user_api_keys)
-            st.caption(f"📡 API 상태: {tot}개 중 {cur}번째 사용 중")
+            st.caption(f"📡 API 상태: {len(st.session_state.user_api_keys)}개 중 {cur}번째 사용 중")
         
         raw_keys = st.text_area("🔑 API Keys", value="\n".join(st.session_state.user_api_keys)).split('\n')
         if st.button("키 저장"):
@@ -103,7 +100,7 @@ def main_app():
             youtube = get_youtube_client()
             if not youtube: st.warning("키 없음")
             else:
-                with st.spinner("채널 조회 중..."):
+                with st.spinner("채널 분석 중..."):
                     main_id = get_channel_id_strong(youtube, target_input)
                     if main_id:
                         next_token = None
@@ -117,7 +114,7 @@ def main_app():
                             next_token = res.get('nextPageToken')
                             if not next_token: break
                         st.success(f"{total}개 저장 완료")
-                    else: st.error("채널 찾기 실패 (할당량 소진 가능성)")
+                    else: st.error("채널 찾기 실패")
 
         st.divider()
         if st.button("로그아웃"):
@@ -125,9 +122,10 @@ def main_app():
             st.session_state.user = None
             st.rerun()
 
-    # 메인 화면
-    tab_scan, tab_manage = st.tabs(["🔍 콘텐츠 분석 검색", "⚙️ DB 관리 및 리스트 수정"])
+    # [메인 화면 탭]
+    tab_scan, tab_manage = st.tabs(["🔍 콘텐츠 분석 검색", "⚙️ DB 관리 및 수정"])
 
+    # 1. DB 관리 탭
     with tab_manage:
         res = supabase.table('channels').select("*").eq("user_id", st.session_state.user.id).execute()
         if res.data:
@@ -149,7 +147,6 @@ def main_app():
                     st.rerun()
 
             df_db['선택'] = df_db['id'].apply(lambda x: x in st.session_state.selected_ids)
-            # 💡 에러 수정 포인트: 변수 이름 통일 (final_df)
             final_df = st.data_editor(
                 df_db[['선택', 'id', 'channel_name', 'category', 'channel_url']],
                 use_container_width=True, hide_index=True,
@@ -170,10 +167,17 @@ def main_app():
                 st.success("삭제 완료"); st.session_state.selected_ids = set(); st.rerun()
         else: st.info("데이터 없음")
 
+    # 2. 분석 탭 (진행도 표시 강화)
     with tab_scan:
         if not res.data: st.warning("채널을 먼저 수집하세요.")
         else:
             df_scan = pd.DataFrame(res.data)
+            
+            # --- 상단 진행도 브리핑 (항상 보임) ---
+            total_channels = len(df_scan)
+            completed_idx = st.session_state.current_batch_index
+            st.markdown(f"### 📊 분석 현황: `{completed_idx}` / `{total_channels}` 개 채널 완료")
+            
             with st.form("scan_form"):
                 f1, f2, f3 = st.columns([2, 1, 1])
                 scan_cats = f1.multiselect("분석 그룹", options=sorted(df_scan['category'].unique()), default=sorted(df_scan['category'].unique()))
@@ -182,35 +186,50 @@ def main_app():
                 t_label = f3.selectbox("기간", list(time_opts.keys()), index=1)
                 min_v = st.number_input("최소 조회수", value=5000)
                 max_s = st.number_input("최대 구독자 (0=무제한)", value=30000)
-                run_btn = st.form_submit_button("🚀 분석 시작 (50개 단위)", type="primary")
+                run_btn = st.form_submit_button("🚀 다음 50개 분석 시작", type="primary")
 
             c_btn1, c_btn2 = st.columns(2)
             if c_btn1.button("🛑 중단"): st.session_state.stop_analysis = True
-            if c_btn2.button("🧹 초기화"):
+            if c_btn2.button("🧹 결과 전체 초기화"):
                 st.session_state.analysis_results = []; st.session_state.current_batch_index = 0; st.rerun()
 
             if run_btn:
                 st.session_state.stop_analysis = False
                 youtube = get_youtube_client()
-                full_list = df_scan[df_scan['category'].isin(scan_cats)].to_dict('records')
+                
+                # 선택된 그룹 필터링
+                target_list = df_scan[df_scan['category'].isin(scan_cats)].to_dict('records')
                 start_idx = st.session_state.current_batch_index
-                end_idx = min(start_idx + 50, len(full_list))
-                batch = full_list[start_idx:end_idx]
+                end_idx = min(start_idx + 50, len(target_list))
+                batch = target_list[start_idx:end_idx]
 
-                if not batch: st.success("모든 분석 완료!"); return
+                if not batch:
+                    st.success("✅ 선택된 모든 그룹의 분석이 완료되었습니다!"); return
 
-                bar = st.progress(0)
-                results = []
+                # 💡 실시간 진행 상황 표시 레이아웃
+                status_box = st.info("🔍 분석을 시작합니다...")
+                progress_bar = st.progress(0)
+                
+                batch_results = []
                 for i, ch in enumerate(batch):
                     if st.session_state.stop_analysis: break
+                    
+                    # 💡 실시간 텍스트 업데이트 (여기서 몇 개 중 몇 개인지 표시)
+                    current_num = start_idx + i + 1
+                    status_box.markdown(f"📡 **분석 중:** `{ch['channel_name']}` (**{current_num}** / {len(target_list)})")
+                    
                     try:
                         c_res = youtube.channels().list(id=ch['channel_id'], part='statistics').execute()
                         items = c_res.get('items', [])
-                        subs = int(items[0].get('statistics', {}).get('subscriberCount', 0)) if items else 0
-                        if subs > max_s and max_s > 0: continue # 3만명 초과 필터링
+                        s_str = items[0].get('statistics', {}).get('subscriberCount') if items else None
+                        subs = int(s_str) if s_str is not None else 999999999 # None이면 제외되도록
+                        
+                        if max_s > 0 and subs > max_s:
+                            progress_bar.progress((i + 1) / len(batch)); continue
 
                         v_res = youtube.search().list(channelId=ch['channel_id'], part='snippet', maxResults=50, order='date', type='video').execute()
                         v_ids = [v['id']['videoId'] for v in v_res.get('items', []) if 'videoId' in v['id']]
+                        
                         if v_ids:
                             d_res = youtube.videos().list(id=','.join(v_ids), part='statistics,snippet,contentDetails').execute()
                             for item in d_res.get('items', []):
@@ -221,16 +240,27 @@ def main_app():
                                 is_s = isodate.parse_duration(item['contentDetails']['duration']).total_seconds() <= 60
                                 if v_format == "롱폼만" and is_s: continue
                                 if v_format == "숏폼만" and not is_s: continue
-                                results.append({"썸네일": item['snippet']['thumbnails']['default']['url'], "채널": item['snippet']['channelTitle'], "구독자": subs, "제목": item['snippet']['title'], "조회수": views, "VPH": round(views / max(age_h, 0.1), 1), "링크": f"https://youtu.be/{item['id']}"})
+                                
+                                batch_results.append({
+                                    "썸네일": item['snippet']['thumbnails']['default']['url'],
+                                    "채널": item['snippet']['channelTitle'],
+                                    "구독자": subs,
+                                    "제목": item['snippet']['title'],
+                                    "조회수": views,
+                                    "VPH": round(views / max(age_h, 0.1), 1),
+                                    "링크": f"https://youtu.be/{item['id']}"
+                                })
                     except Exception as e:
                         if "quotaExceeded" in str(e): youtube = switch_api_key()
                         if st.session_state.stop_analysis: break
-                    bar.progress((i + 1) / len(batch))
+                    
+                    progress_bar.progress((i + 1) / len(batch))
 
-                st.session_state.analysis_results.extend(results)
+                st.session_state.analysis_results.extend(batch_results)
                 st.session_state.current_batch_index = end_idx
                 st.rerun()
 
+            # --- 결과 표 출력 ---
             if st.session_state.analysis_results:
                 df_res = pd.DataFrame(st.session_state.analysis_results).drop_duplicates(subset=['링크']).sort_values("VPH", ascending=False)
                 st.data_editor(df_res, column_config={"썸네일": st.column_config.ImageColumn(), "링크": st.column_config.LinkColumn()}, use_container_width=True, hide_index=True)
