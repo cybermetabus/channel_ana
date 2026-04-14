@@ -68,7 +68,7 @@ def login_page():
     master_pw = st.text_input("접속 암호", type="password")
     
     if st.button("접속하기", type="primary", use_container_width=True):
-        if master_pw == "0000": # <--- 여기에 사용할 암호를 설정하세요
+        if master_pw == "1795": # <--- 여기에 사용할 암호를 설정하세요
             if nickname:
                 # 가짜 유저 객체를 생성하여 기존 코드와 호환성을 유지합니다.
                 class UserInfo:
