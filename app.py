@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 import isodate
 import time
+import re
 
 # --- 1. 초기 설정 및 DB 연결 ---
 st.set_page_config(page_title="YouTube Growth Manager", layout="wide")
@@ -24,7 +25,7 @@ if 'current_batch_index' not in st.session_state: st.session_state.current_batch
 if 'stop_analysis' not in st.session_state: st.session_state.stop_analysis = False
 if 'selected_ids' not in st.session_state: st.session_state.selected_ids = set()
 
-# --- 3. API 엔진 및 유틸리티 ---
+# --- 3. API 엔진 및 유틸리티 (강력한 핸들 인식 추가) ---
 def get_youtube_client():
     keys = st.session_state.user_api_keys
     if not keys: return None
@@ -36,15 +37,32 @@ def switch_api_key():
     st.toast(f"🔄 API 전환: {st.session_state.api_key_index + 1}번째 키 사용")
     return get_youtube_client()
 
-def get_channel_id_by_handle(youtube, handle):
-    handle = handle.strip()
-    clean_handle = handle if handle.startswith('@') else '@' + handle
+def get_channel_id_by_handle(youtube, input_text):
+    """핸들, URL 전체 주소에서 채널 ID를 추출하는 강력한 함수"""
+    if not input_text: return None
+    
+    # 💡 URL에서 핸들(@...)만 추출 (정규표현식)
+    handle_match = re.search(r'(@[\w.-]+)', input_text)
+    if handle_match:
+        target = handle_match.group(1)
+    else:
+        target = input_text.strip()
+        if not target.startswith('@'): target = '@' + target
+
     try:
-        res = youtube.channels().list(forHandle=clean_handle, part='id').execute()
-        return res['items'][0]['id'] if res.get('items') else None
+        # 방법 1: 핸들 전용 API 조회 (할당량 1점)
+        res = youtube.channels().list(forHandle=target, part='id').execute()
+        if res.get('items'):
+            return res['items'][0]['id']
+        
+        # 방법 2: 방법 1 실패 시 검색 API 사용 (할당량 100점 소모되지만 확실함)
+        search_res = youtube.search().list(q=target, type='channel', part='id', maxResults=1).execute()
+        if search_res.get('items'):
+            return search_res['items'][0]['id']['channelId']
+        return None
     except: return None
 
-# --- 4. 로그인 / 회원가입 (NameError 방지를 위해 상단 배치) ---
+# --- 4. 로그인 / 회원가입 ---
 def login_page():
     st.title("🔐 YouTube Analyzer")
     t1, t2 = st.tabs(["로그인", "회원가입"])
@@ -76,15 +94,17 @@ def main_app():
         
         st.divider()
         st.subheader("📥 채널 수집")
-        target_handle = st.text_input("기준 핸들 (@...)")
+        target_handle = st.text_input("기준 핸들 또는 URL (@...)")
         group_name = st.text_input("저장 그룹명", value="미분류")
+        
         if st.button("모든 구독 리스트 불러오기"):
             youtube = get_youtube_client()
             if not youtube: st.warning("키를 먼저 넣으세요.")
             else:
-                with st.spinner("수집 중..."):
+                with st.spinner("채널 찾는 중..."):
                     main_id = get_channel_id_by_handle(youtube, target_handle)
                     if main_id:
+                        st.sidebar.info(f"✅ 채널 확인: {main_id}")
                         next_token = None
                         total = 0
                         while True:
@@ -100,8 +120,8 @@ def main_app():
                             next_token = res.get('nextPageToken')
                             if not next_token: break
                         st.success(f"총 {total}개 채널 저장 완료!")
-                    else: st.error("채널을 찾을 수 없습니다.")
-        
+                    else: st.error("채널을 찾을 수 없습니다. 주소나 핸들을 확인하세요.")
+
         st.divider()
         if st.button("로그아웃"):
             supabase.auth.sign_out()
@@ -111,56 +131,51 @@ def main_app():
     # [메인 화면 탭]
     tab_scan, tab_manage = st.tabs(["🔍 콘텐츠 분석 검색", "⚙️ DB 관리 및 일괄 수정"])
 
-    # ⚙️ DB 관리 탭 (진짜 전체 선택 및 카테고리별 선택 구현)
+    # ⚙️ DB 관리 탭 (전체/카테고리 일괄 선택 강화)
     with tab_manage:
-        st.subheader("⚙️ 채널 리스트 마스터 관리")
+        st.subheader("⚙️ 채널 리스트 정밀 관리")
         res = supabase.table('channels').select("*").execute()
         if res.data:
             df_db = pd.DataFrame(res.data)
             all_cats = sorted(df_db['category'].unique().tolist())
 
-            # --- 일괄 선택 컨트롤 레이아웃 ---
             c1, c2 = st.columns([2, 3])
             with c1:
                 st.write("**기본 선택**")
                 sel_col1, sel_col2 = st.columns(2)
-                if sel_col1.button("✅ 모든 데이터 선택"):
+                if sel_col1.button("✅ 모든 채널 선택"):
                     st.session_state.selected_ids = set(df_db['id'].tolist())
                     st.rerun()
-                if sel_col2.button("❌ 모든 선택 해제"):
+                if sel_col2.button("❌ 선택 전체 해제"):
                     st.session_state.selected_ids = set()
                     st.rerun()
             
             with c2:
-                st.write("**카테고리별 일괄 선택**")
+                st.write("**카테고리별 선택**")
                 cat_to_sel = st.selectbox("카테고리 선택", ["직접 고르세요"] + all_cats, label_visibility="collapsed")
-                if st.button("🎯 해당 카테고리 전체 선택"):
+                if st.button("🎯 해당 카테고리 모두 선택"):
                     if cat_to_sel != "직접 고르세요":
                         new_ids = set(df_db[df_db['category'] == cat_to_sel]['id'].tolist())
                         st.session_state.selected_ids.update(new_ids)
                         st.rerun()
 
             st.divider()
-
-            # 선택 상태를 포함한 표 구성
             df_db['선택'] = df_db['id'].apply(lambda x: x in st.session_state.selected_ids)
             edited_df = st.data_editor(
                 df_db[['선택', 'id', 'channel_name', 'category', 'channel_url']],
                 use_container_width=True, hide_index=True,
                 column_config={"선택": st.column_config.CheckboxColumn("선택"), "id": None, "channel_url": st.column_config.LinkColumn("링크")},
-                key="manage_editor_v4"
+                key="manage_editor_v5"
             )
-            
-            # 에디터에서 개별 체크한 것 업데이트
             st.session_state.selected_ids = set(edited_df[edited_df['선택'] == True]['id'].tolist())
-            st.write(f"현재 **{len(st.session_state.selected_ids)}개** 채널이 작업 대상으로 선택되었습니다.")
+            st.write(f"현재 **{len(st.session_state.selected_ids)}개** 채널 선택됨")
 
-            # --- 일괄 작업 버튼 ---
-            st.subheader("🚀 선택 항목 작업 실행")
+            # 일괄 작업 버튼
+            st.subheader("🚀 선택 항목 일괄 처리")
             bc1, bc2 = st.columns(2)
             with bc1:
-                new_cat_name = st.text_input("새 카테고리명 입력", placeholder="예: 무시할채널")
-                if st.button("🏷️ 선택 채널 카테고리 일괄 변경"):
+                new_cat_name = st.text_input("변경할 카테고리명 입력")
+                if st.button("🏷️ 카테고리 일괄 변경"):
                     if st.session_state.selected_ids and new_cat_name:
                         for i in st.session_state.selected_ids:
                             supabase.table('channels').update({"category": new_cat_name}).eq("id", i).execute()
@@ -168,17 +183,17 @@ def main_app():
                         st.session_state.selected_ids = set()
                         st.rerun()
             with bc2:
-                st.write("---") # 높이 맞춤
-                if st.button("🗑️ 선택 채널 일괄 삭제", type="secondary"):
+                st.write("---")
+                if st.button("🗑️ 선택 항목 일괄 삭제", type="secondary"):
                     if st.session_state.selected_ids:
                         for i in st.session_state.selected_ids:
                             supabase.table('channels').delete().eq("id", i).execute()
                         st.success("삭제 완료!")
                         st.session_state.selected_ids = set()
                         st.rerun()
-        else: st.info("등록된 데이터가 없습니다.")
+        else: st.info("등록된 채널이 없습니다.")
 
-    # 🔍 콘텐츠 분석 검색 탭 (None 필터링 및 누적 검색)
+    # 🔍 콘텐츠 분석 검색 탭 (누적 검색 및 None 철벽 필터)
     with tab_scan:
         if not res.data: st.warning("채널을 먼저 수집해주세요.")
         else:
@@ -188,7 +203,6 @@ def main_app():
                 f1, f2, f3 = st.columns([2, 1, 1])
                 scan_cats = f1.multiselect("분석 그룹", options=sorted(df_scan_all['category'].unique()), default=sorted(df_scan_all['category'].unique()))
                 v_format = f2.selectbox("영상 포맷", ["전체", "롱폼만", "숏폼만"])
-                
                 time_opts = {"12시간": 12, "24시간": 24, "48시간": 48, "3일": 72, "1주": 168, "2주": 336, "3주": 504, "한달": 720, "전체": 999999}
                 t_label = f3.selectbox("업로드 기간", list(time_opts.keys()), index=4)
                 
@@ -234,12 +248,11 @@ def main_app():
                         if items:
                             stats = items[0].get('statistics', {})
                             subs_str = stats.get('subscriberCount')
-                            # ⚠️ None이라면 초대형 채널(9억명)로 가정하여 max_s 필터에서 걸러지게 함
+                            # None이면 9억 명으로 처리해서 max_s 필터에 걸리게 함
                             subs = int(subs_str) if subs_str is not None else 999999999
-                        else:
-                            subs = 0
+                        else: subs = 0
 
-                        # 💡 2단계: 구독자 필터 적용 (여기서 대형 채널이 결과에서 사라짐)
+                        # 💡 2단계: 구독자 필터 적용
                         if (min_s > 0 and subs < min_s) or (max_s > 0 and subs > max_s):
                             bar.progress((i + 1) / len(current_batch))
                             continue
@@ -256,8 +269,7 @@ def main_app():
                                 views = int(item['statistics'].get('viewCount', 0))
                                 if views < min_v: continue
                                 
-                                dur = isodate.parse_duration(item['contentDetails']['duration']).total_seconds()
-                                is_s = dur <= 60
+                                is_s = isodate.parse_duration(item['contentDetails']['duration']).total_seconds() <= 60
                                 if v_format == "롱폼만" and is_s: continue
                                 if v_format == "숏폼만" and not is_s: continue
 
@@ -284,7 +296,7 @@ def main_app():
                 df_res = df_res.sort_values("VPH", ascending=False)
                 st.data_editor(df_res, column_config={"썸네일": st.column_config.ImageColumn(), "링크": st.column_config.LinkColumn()}, use_container_width=True, hide_index=True)
 
-# --- 6. 실행 제어 (NameError 해결: 함수 정의 후 호출) ---
+# --- 6. 실행 제어 ---
 if st.session_state.user is None:
     login_page()
 else:
